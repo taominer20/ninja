@@ -306,7 +306,6 @@ ${chalk.bold("Environment Variables:")}
   ${ENV_AGENT_DIR.padEnd(32)} - Session storage directory (default: ~/${CONFIG_DIR_NAME}/agent)
   PI_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
   PI_OFFLINE                       - Disable startup network operations when set to 1/true/yes
-  PI_TASK_STYLE                    - Solver-mode post-task style: "between-lines" (default) or "off"
   PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
   PI_AI_ANTIGRAVITY_VERSION        - Override Antigravity User-Agent version (e.g., 1.23.0)
 

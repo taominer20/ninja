@@ -176,11 +176,10 @@ async function runLoop(
 	let hasProducedEdit = false;
 	let emptyTurnRetries = 0;
 	const EMPTY_TURN_MAX = 2;
+	let totalLlmRequests = 0;
+	let lastSlowPaceNudgeAt = 0;
 
 	const loopStart = Date.now();
-	let earlyNudgeSent = false;
-	let urgentNudgeSent = false;
-	let finalNudgeSent = false;
 	const pathsAlreadyRead = new Set<string>();
 	const pathReadCounts = new Map<string, number>();
 	let lastRereadNudgeAt = 0;
@@ -190,7 +189,6 @@ async function runLoop(
 	let consecutiveEditsOnSameFile = 0;
 	let lastEditedFile = "";
 
-	const uneditedFileNotifyPaths = new Set<string>();
 	const coverageNotifyPaths = new Set<string>();
 
 	let workPhase: "search" | "absorb" | "apply" = "search";
@@ -336,19 +334,14 @@ async function runLoop(
 		return missing;
 	};
 
-	const EARLY_NUDGE_MS = 10_000;
-	const URGENT_NUDGE_MS = 22_000;
-	const LATE_NUDGE_MS = 55_000;
 	const GRACEFUL_EXIT_MS = 290_000;
 	const PREEMPT_EXIT_MS = 230_000;
-	let multiFileHintSent = false;
 	let reviewPassDone = false;
 
 	/** Successful `edit` or `write` mutates disk — both must advance scoring-related loop state (was edit-only). */
 	const recordSuccessfulFileMutation = async (targetPath: string): Promise<void> => {
 		editFailMap.set(targetPath, 0);
 		priorFailedAnchor.delete(targetPath);
-		const firstMutation = !hasProducedEdit;
 		hasProducedEdit = true;
 		explorationCount = 0;
 		const normTarget = normalizePath(targetPath);
@@ -376,21 +369,6 @@ async function runLoop(
 				.join(", ")}. Move to the next unedited file — breadth across files scores higher than depth in one file.`;
 		}
 
-		if (uneditedTargets.length > 0) {
-			pendingMessages.push({
-				role: "user",
-				content: [
-					{
-						type: "text",
-						text: `Coverage check: ${uneditedTargets.length} discovered target file(s) still need edits: ${uneditedTargets
-							.slice(0, 6)
-							.map((f: string) => `\`${f}\``)
-							.join(", ")}. Do not stop until you have covered them or clearly explained why each can be skipped.`,
-					},
-				],
-				timestamp: Date.now(),
-			});
-		}
 		let siblingHint = "";
 		try {
 			const { readdirSync } = await import("node:fs");
@@ -431,19 +409,6 @@ async function runLoop(
 			],
 			timestamp: Date.now(),
 		});
-		if (firstMutation && !multiFileHintSent && (foundFiles.length >= 4 || pathsAlreadyRead.size >= 4)) {
-			multiFileHintSent = true;
-			pendingMessages.push({
-				role: "user",
-				content: [
-					{
-						type: "text",
-						text: "You touched several candidate paths. If any acceptance criterion still maps to a file you have not edited, continue there before stopping — ties favor complete coverage.",
-					},
-				],
-				timestamp: Date.now(),
-			});
-		}
 	};
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
@@ -487,13 +452,10 @@ async function runLoop(
 					const _dm = _dl.match(/^:\d+ \d+ [0-9a-f]+ [0-9a-f]+ ([AMD])\t(.+)$/);
 					if (!_dm) continue;
 					if (_dm[1] === "A" || _dm[1] === "M")
-						// by rjc
 						if (isRealUnixFile(_dm[2]))
 							_rf.push(_dm[2]);
 				}
-				// by rjc
-				// Remove condition of "_rf.length <= 20"
-				if (_rf.length > 0/* && _rf.length <= 20*/) {
+				if (_rf.length > 0) {
 					const _norm = (s: string) => s.replace(/^\.\//, "");
 					let toMerge = _rf;
 					if (expectedFiles.length > 0) {
@@ -585,7 +547,41 @@ async function runLoop(
 				}
 			}
 			hasMoreToolCalls = toolCalls.length > 0;
-			// by rjc
+			totalLlmRequests++;
+
+			// v217: Slow-pace detection — 10s threshold, repeating every 30s
+			if (totalLlmRequests >= 3 && pendingMessages.length === 0) {
+				const elapsed = Date.now() - loopStart;
+				const avgPace = elapsed / totalLlmRequests;
+				if (avgPace > 10_000 && elapsed > 20_000 && (Date.now() - lastSlowPaceNudgeAt) > 30_000) {
+					lastSlowPaceNudgeAt = Date.now();
+					const topFile = foundFiles[0] || [...pathsAlreadyRead][0] || "";
+					pendingMessages.push({
+						role: "user",
+						content: [{ type: "text", text: "You are averaging " + Math.round(avgPace / 1000) + "s per response — too slow. Shorten your reasoning and call tools faster. " + (topFile && !hasProducedEdit ? "Call `edit` on `" + topFile + "` NOW." : "Keep editing — every file matters.") }],
+						timestamp: Date.now(),
+					});
+				}
+			}
+
+			// v222: Mid-run low-edit coverage nudge — if we're past 60s, have edited few files,
+			// and there are unedited top files, force the agent to edit them
+			if (hasProducedEdit && pendingMessages.length === 0) {
+				const elapsed = Date.now() - loopStart;
+				const uneditedTop = foundFiles.filter((f: string) => !wasEdited(f));
+				if (elapsed >= 60_000 && editedPaths.size < foundFiles.length && uneditedTop.length > 0 && elapsed < GRACEFUL_EXIT_MS - 30_000) {
+					const ratio = editedPaths.size / Math.max(foundFiles.length, 1);
+					if (ratio < 0.6) {
+						const list = uneditedTop.slice(0, 5).map((f: string) => `\`${f}\``).join(", ");
+						pendingMessages.push({
+							role: "user",
+							content: [{ type: "text", text: `WARNING: ${Math.round(elapsed / 1000)}s elapsed but you have only edited ${editedPaths.size}/${foundFiles.length} target files. Unedited: ${list}. Each unedited file = missed points. Read and edit them NOW — even partial changes score. Do not spend more time on already-edited files.` }],
+							timestamp: Date.now(),
+						});
+					}
+				}
+			}
+
 			if (hasMoreToolCalls) {
 				coverageRetries = 0;
 				criteriaCoverageRetries = 0;
@@ -633,14 +629,11 @@ async function runLoop(
 					coverageRetries++;
 					await emit({ type: "turn_end", message, toolResults: [] });
 
-					// by ryc
-					// const list = missing.slice(0, 5).map((f) => `\`${f}\``).join(", ");
 					const missedFound = [...missing].filter((f: string) => {
 						const nf = f.replace(/^\.\//, "");
 						return !coverageNotifyPaths.has(f) && !coverageNotifyPaths.has(nf) && !coverageNotifyPaths.has("./" + nf);
 					});
 					const list = missedFound.slice(0, 5).map((f) => `\`${f}\``).join(", ");
-					// update coverageNotifyPaths
 					for (const f of missedFound.slice(0, 5)) coverageNotifyPaths.add(f);
 
 					pendingMessages.push({
@@ -655,14 +648,11 @@ async function runLoop(
 						coverageRetries++;
 						await emit({ type: "turn_end", message, toolResults: [] });
 
-						// by ryc
-						// const list = missing.slice(0, 5).map((f) => `\`${f}\``).join(", ");
 						const missedFound = [...missing].filter((f: string) => {
 							const nf = f.replace(/^\.\//, "");
 							return !coverageNotifyPaths.has(f) && !coverageNotifyPaths.has(nf) && !coverageNotifyPaths.has("./" + nf);
 						});
 						const list = missedFound.slice(0, 5).map((f) => `\`${f}\``).join(", ");
-						// update coverageNotifyPaths
 						for (const f of missedFound.slice(0, 5)) coverageNotifyPaths.add(f);
 
 						pendingMessages.push({
@@ -713,7 +703,6 @@ async function runLoop(
 						if (!targetPath || typeof targetPath !== "string") continue;
 						if (isRealUnixFile(targetPath) == false) continue;
 						if (tr.isError) {
-							// if (pendingMessages.length === 0) {
 							pendingMessages.push({
 								role: "user",
 								content: [
@@ -724,7 +713,6 @@ async function runLoop(
 								],
 								timestamp: Date.now(),
 							});
-							// }
 							continue;
 						}
 						await recordSuccessfulFileMutation(targetPath);
@@ -840,8 +828,6 @@ async function runLoop(
 								for (const path of paths) {
 									if (!isRealUnixFile(path)) continue;
 									addFoundFile(path);
-									// by rjc
-									// if (foundFiles.length > 20) break;
 								}
 								workPhase = "absorb";
 								pendingMessages.push({
@@ -864,7 +850,6 @@ async function runLoop(
 							workPhase = "apply";
 						}
 					}
-					// by rjc
 					if (workPhase !== "apply") {
 						const absorbLimit = Math.min(Math.max(3, foundFiles.length > 10 ? 6 : 3), 8);
 						if (absorbedFiles.size >= absorbLimit && workPhase === "absorb" && pendingMessages.length === 0) {
@@ -892,6 +877,47 @@ async function runLoop(
 						if (readPath && typeof readPath === "string" && isRealUnixFile(readPath)) {
 							pathsAlreadyRead.add(readPath);
 							pathReadCounts.set(readPath, (pathReadCounts.get(readPath) ?? 0) + 1);
+							const readContent = tr.content?.map((c: any) => c.text ?? "").join("") ?? "";
+							if (readContent.length > 0 && readContent.length < 200_000 && foundFiles.length < 25) {
+								const dir = readPath.includes("/") ? readPath.substring(0, readPath.lastIndexOf("/")) : ".";
+								const importRe = /(?:from\s+['"]|import\s+['"]|require\s*\(\s*['"])([.@][^'"]+)['"]/g;
+								let im: RegExpExecArray | null;
+								let aliasRoot = "src";
+								try {
+									const { existsSync: _aex, readFileSync: _arf } = require("node:fs");
+									for (const cfg of ["tsconfig.json", "jsconfig.json"]) {
+										if (_aex(cfg)) {
+											const raw = _arf(cfg, "utf-8");
+											const pm = raw.match(/"@\/\*"\s*:\s*\["([^"*]+)/);
+											if (pm) { aliasRoot = pm[1].replace(/\/$/, ""); break; }
+											const bm = raw.match(/"baseUrl"\s*:\s*"([^"]+)"/);
+											if (bm) { aliasRoot = bm[1].replace(/\/$/, ""); break; }
+										}
+									}
+								} catch {}
+								while ((im = importRe.exec(readContent)) !== null) {
+									if (foundFiles.length >= 25) break;
+									const raw = im[1];
+									let norm: string;
+									if (raw.startsWith("@/")) {
+										norm = aliasRoot + raw.substring(1);
+									} else if (raw.startsWith(".")) {
+										const resolved = dir === "." ? raw : dir + "/" + raw;
+										norm = resolved.replace(/^\.\//, "").replace(/\/\.\//g, "/");
+									} else { continue; }
+									const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".py", "/index.ts", "/index.tsx", "/index.js"];
+									for (const ext of exts) {
+										const candidate = norm + ext;
+										try {
+											const { existsSync: _ex } = require("node:fs");
+											if (_ex(candidate)) {
+												addFoundFile(candidate);
+												break;
+											}
+										} catch { break; }
+									}
+								}
+							}
 						}
 					}
 				}
@@ -904,13 +930,9 @@ async function runLoop(
 							const normRp = rp.replace(/^\.\//, "");
 							const others = foundFiles.filter((f: string) => {
 								const normF = f.replace(/^\.\//, "");
-								// by rjc
-								// return normF !== normRp && !editedPaths.has(f) && !editedPaths.has(normF) && !editedPaths.has("./" + normF);
 								return normF !== normRp && !wasEdited(f) && !lastRereadNudgePaths.has(f) && !lastRereadNudgePaths.has(normF) && !lastRereadNudgePaths.has("./" + normF);
 							});
 
-							// by ryc
-							// update lastRereadNudgePaths
 							if (others.length > 0) {
 								for (const f of others.slice(0, 5)) lastRereadNudgePaths.add(f);
 							}
@@ -981,86 +1003,10 @@ async function runLoop(
 					}
 				}
 
-				if (!hasProducedEdit && pendingMessages.length === 0) {
-					const elapsed = Date.now() - loopStart;
-					const readList = pathsAlreadyRead.size > 0
-						? `Previously read: ${[...pathsAlreadyRead].slice(0, 5).join(", ")}. `
-						: "";
-					if (!earlyNudgeSent && elapsed >= EARLY_NUDGE_MS) {
-						earlyNudgeSent = true;
-						pendingMessages.push({
-							role: "user",
-							content: [
-								{
-									type: "text",
-									text: `${Math.round(elapsed / 1000)}s elapsed without any successful file changes. An empty diff scores zero. ${readList}Apply \`edit\` or \`write\` to the most relevant path now. Even one correct change contributes to your score.`,
-								},
-							],
-							timestamp: Date.now(),
-						});
-					} else if (earlyNudgeSent && elapsed >= URGENT_NUDGE_MS && !urgentNudgeSent) {
-						urgentNudgeSent = true;
-						pendingMessages.push({
-							role: "user",
-							content: [
-								{
-									type: "text",
-									text: `${Math.round(elapsed / 1000)}s in with zero file modifications. Time may be running out. ${readList}Make an edit immediately or accept a zero score.`,
-								},
-							],
-							timestamp: Date.now(),
-						});
-					}
-				}
-
-				if (hasProducedEdit && pendingMessages.length === 0) {
-					const elapsed = Date.now() - loopStart;
-					const uniqueEdited = new Set([...editedPaths].map(p => p.replace(/^\.\//, "")));
-					const uneditedFound = foundFiles.filter((f: string) => {
-						const nf = f.replace(/^\.\//, "");
-						// by ryc
-						// return !uniqueEdited.has(nf);
-						return !uniqueEdited.has(f) && !uniqueEdited.has(nf) && !uniqueEdited.has("./" + nf) && !uneditedFileNotifyPaths.has(f) && !uneditedFileNotifyPaths.has(nf) && !uneditedFileNotifyPaths.has("./" + nf);
-					});
-					if (uneditedFound.length > 0 && elapsed > 30_000 && uniqueEdited.size <= 2) {
-						// by ryc
-						// update uneditedFileNotifyPaths
-						for (const f of uneditedFound.slice(0, 8)) uneditedFileNotifyPaths.add(f);
-
-						pendingMessages.push({
-							role: "user",
-							content: [{
-								type: "text",
-								text: `30s+ elapsed and you have only edited ${uniqueEdited.size} file(s). ${uneditedFound.length} discovered target(s) remain: ${uneditedFound.slice(0, 8).map((f: string) => `\`${f}\``).join(", ")}. Read and edit each one before going back to files you already edited.`,
-							}],
-							timestamp: Date.now(),
-						});
-					}
-				}
-
 				if ((Date.now() - loopStart) >= GRACEFUL_EXIT_MS) {
 					await emit({ type: "turn_end", message, toolResults });
 					await emit({ type: "agent_end", messages: newMessages });
 					return;
-				}
-
-				if (
-					!hasProducedEdit &&
-					!finalNudgeSent &&
-					(Date.now() - loopStart) >= LATE_NUDGE_MS &&
-					pendingMessages.length === 0
-				) {
-					finalNudgeSent = true;
-					pendingMessages.push({
-						role: "user",
-						content: [
-							{
-								type: "text",
-								text: "Over 50s without successful file changes. Pick the clearest path from the task or keyword list and apply \`edit\` or \`write\` now — further discovery has diminishing returns.",
-							},
-						],
-						timestamp: Date.now(),
-					});
 				}
 			}
 
