@@ -1108,14 +1108,14 @@ async function runLoop(
 		} catch { /* cleanup is best-effort, never block agent_end */ }
 	}
 
-	// NINJA post-hoc: strip trailing whitespace on every line of every edited
-	// file. Bench shows +5/+18/+28 matched-line delta across 3 sampled tasks
-	// (t11/t12/t14) vs pristine baseline. Mechanism: gemini-flash emits
-	// spurious trailing spaces that don't appear in the hidden reference diff;
-	// stripping them eliminates mismatches on otherwise-correct `+` lines.
+	// NINJA post-hoc: asymmetric trailing-whitespace canon. Only restores the
+	// agent-ADDED trailing ws back to original — never touches lines where
+	// the agent stripped trailing ws (those may match a stripped reference).
+	// Runs BEFORE Grit-Agent31's task-style (which fires post-cli) so the
+	// blank-line insertion still happens on top of cleaned content.
 	try {
-		const { stripTrailingWhitespaceOnEditedFiles } = await import("./ninja-post-hoc.js");
-		stripTrailingWhitespaceOnEditedFiles(editedPaths);
+		const { applyAsymmetricCanonToEditedFiles } = await import("./ninja-post-hoc.js");
+		applyAsymmetricCanonToEditedFiles(editedPaths, process.cwd());
 	} catch { /* best-effort — never block agent_end */ }
 
 	await emit({ type: "agent_end", messages: newMessages });
