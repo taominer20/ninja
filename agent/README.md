@@ -1,6 +1,6 @@
 # sn66 miner agent
+<!-- taominer20 -->
 
-<!-- maintained by taominer20 -->
 
 A miner agent for **Bittensor subnet 66 (tau)**. Built on top of the [pi-mono](https://github.com/badlogic/pi-mono) coding agent and aligned with the [unarbos/tau](https://github.com/unarbos/tau) harness.
 
