@@ -357,7 +357,7 @@ async function runLoop(
 			return !wasEdited(f);
 		});
 		let breadthHint = "";
-		if (consecutiveEditsOnSameFile >= 10 && uneditedTargets.length > 0) {
+		if (consecutiveEditsOnSameFile >= 5 && uneditedTargets.length > 0) {
 			breadthHint = ` STOP editing \`${normTarget}\` — you have made ${consecutiveEditsOnSameFile} consecutive edits on it. ${uneditedTargets.length} file(s) still need ANY edit: ${uneditedTargets
 				.slice(0, 6)
 				.map((f: string) => `\`${f}\``)
@@ -377,7 +377,6 @@ async function runLoop(
 				.filter((entry: { isFile(): boolean }) => entry.isFile())
 				.map((entry: { name: string }) => (dir === "." ? entry.name : dir + "/" + entry.name))
 				.filter((f: string) => !wasEdited(f));
-			// v157: show ALL code files in same dir (not just same extension)
 			const codeExts = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.dart', '.vue', '.svelte', '.rb', '.java', '.kt', '.cs', '.cpp', '.c', '.h', '.php', '.swift']);
 			const related = siblings
 				.filter((f: string) => {
@@ -411,9 +410,6 @@ async function runLoop(
 		});
 	};
 
-	// Outer loop: continues when queued follow-up messages arrive after agent would stop
-	// Optional git hint (from v701): merge paths that differ vs a base ref into expected targets.
-	// Unlike v701, we do not delete paths — only broaden coverage for nudges.
 	try {
 		const { spawnSync: _gSpawn } = await import("node:child_process");
 		const _cwd = process.cwd();
@@ -894,7 +890,7 @@ async function runLoop(
 											if (bm) { aliasRoot = bm[1].replace(/\/$/, ""); break; }
 										}
 									}
-								} catch {}
+								} catch { }
 								while ((im = importRe.exec(readContent)) !== null) {
 									if (foundFiles.length >= 25) break;
 									const raw = im[1];
@@ -1107,24 +1103,6 @@ async function runLoop(
 			}
 		} catch { /* cleanup is best-effort, never block agent_end */ }
 	}
-
-	// NINJA pipeline: asymmetric trailing-ws restoration + extreme blank-run
-	// collapse, applied to every changed file. Runs unconditionally — no env
-	// gate — so the on-chain validator gets the lift without needing to set
-	// any env vars.
-	try {
-		const { applyPipelineToChangedFiles } = await import("./ninja-pipeline.js");
-		applyPipelineToChangedFiles(process.cwd());
-	} catch { /* best-effort */ }
-
-	// NINJA Edge B: whole-file cosmetic-only revert. If a file's residual
-	// changes after the pipeline are still entirely whitespace noise, revert
-	// it to original (cosmetic churn never matches reference). Reduces
-	// per-task diff noise on edge cases the pipeline can't fully clean up.
-	try {
-		const { applyWholeFileCosmeticRevert } = await import("./ninja-edge-b.js");
-		applyWholeFileCosmeticRevert(process.cwd());
-	} catch { /* best-effort */ }
 
 	await emit({ type: "agent_end", messages: newMessages });
 }

@@ -334,7 +334,7 @@ Switch to Mode B immediately if that check reveals an explicit second required f
 - If multiple implementations fit, choose the one that mirrors the surrounding file most literally (minimal novelty).
 - Keep changes local and minimal; avoid reordering and broad rewrites.
 - Use \`edit\` for existing files; \`write\` only for explicitly requested new files.
-- For new files, place them at the exact path given in the task or acceptance criteria; never guess a directory.
+- For new files: if the task gives a full path with a directory (e.g., \`scripts/foo.py\`), use it exactly. If the task gives only a bare filename with no directory (e.g., \`foo.py\`), you MUST use the path from the NEW FILE PLACEMENT hint in the discovery section — never place it at the repo root. A bare filename is not a full path.
 - Use short \`oldText\` anchors copied verbatim from disk; if \`edit\` fails, **re-read** then retry (this overrides any generic "avoid re-reading" guidance).
 - Do not refactor, clean up, or fix unrelated issues.
 - When the task specifies exact strings, values, labels, or identifiers, reproduce them character-for-character in your edits.
@@ -465,7 +465,7 @@ Switch to Mode B immediately if that check reveals an explicit second required f
 - If multiple implementations fit, choose the one that mirrors the surrounding file most literally (minimal novelty).
 - Keep changes local and minimal; avoid reordering and broad rewrites.
 - Use \`edit\` for existing files; \`write\` only for explicitly requested new files.
-- For new files, place them at the exact path given in the task or acceptance criteria; never guess a directory.
+- For new files: if the task gives a full path with a directory (e.g., \`scripts/foo.py\`), use it exactly. If the task gives only a bare filename with no directory (e.g., \`foo.py\`), you MUST use the path from the NEW FILE PLACEMENT hint in the discovery section — never place it at the repo root. A bare filename is not a full path.
 - Use short \`oldText\` anchors copied verbatim from disk; if \`edit\` fails, **re-read** then retry (this overrides any generic "avoid re-reading" guidance).
 - Do not refactor, clean up, or fix unrelated issues.
 - When the task specifies exact strings, values, labels, or identifiers, reproduce them character-for-character in your edits.
@@ -552,7 +552,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 			prompt += appendSection;
 		}
 
-		// Append project context files
 		if (contextFiles.length > 0) {
 			prompt += "\n\n# Project Context\n\n";
 			prompt += "Project-specific instructions and guidelines:\n\n";
@@ -561,39 +560,31 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 			}
 		}
 
-		// Append skills section (only if read tool is available)
 		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
 		if (customPromptHasRead && skills.length > 0) {
 			prompt += "\n\n# Skilled Section\n\n";
 			prompt += formatSkillsForPrompt(skills);
 		}
 
-		// Add date and working directory last
 		prompt += `\nCurrent date: ${date}`;
 		prompt += `\nCurrent working directory: ${promptCwd}`;
 
 		return prompt;
 	}
 
-	// Get absolute paths to documentation and examples
 	const readmePath = getReadmePath();
 	const docsPath = getDocsPath();
 	const examplesPath = getExamplesPath();
 
-	// Build tools list based on selected tools.
-	// A tool appears in Available tools only when the caller provides a one-line snippet.
 	const tools = selectedTools || ["read", "bash", "grep", "find", "ls", "edit", "write"];
 	const visibleTools = tools.filter((name) => !!toolSnippets?.[name]);
 	const toolsList =
 		visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets![name]}`).join("\n") : "(none)";
 
-	// Build guidelines based on which tools are actually available
 	const guidelinesList: string[] = [];
 	const guidelinesSet = new Set<string>();
 	const addGuideline = (guideline: string): void => {
-		if (guidelinesSet.has(guideline)) {
-			return;
-		}
+		if (guidelinesSet.has(guideline)) return;
 		guidelinesSet.add(guideline);
 		guidelinesList.push(guideline);
 	};
@@ -604,7 +595,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 	const hasLs = tools.includes("ls");
 	const hasRead = tools.includes("read");
 
-	// File exploration guidelines
 	if (hasBash && !hasGrep && !hasFind && !hasLs) {
 		addGuideline("Use bash for file operations like ls, rg, find");
 	} else if (hasBash && (hasGrep || hasFind || hasLs)) {
@@ -613,12 +603,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 
 	for (const guideline of promptGuidelines ?? []) {
 		const normalized = guideline.trim();
-		if (normalized.length > 0) {
-			addGuideline(normalized);
-		}
+		if (normalized.length > 0) addGuideline(normalized);
 	}
 
-	// Always include these
 	addGuideline("Be concise in your responses");
 	addGuideline("Show file paths clearly when working with files");
 
@@ -639,22 +626,13 @@ In addition to the tools above, you may have access to other custom tools depend
 ${guidelines}
 `;
 
-	prompt += TAU_SCORING_PREAMBLE_FOR_MAIN_BRANCH
-
-	// 	prompt += `Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
-	// - Main documentation: ${readmePath}
-	// - Additional docs: ${docsPath}
-	// - Examples: ${examplesPath} (extensions, custom tools, SDK)
-	// - When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md)
-	// - When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
-	// - Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;
+	prompt += TAU_SCORING_PREAMBLE_FOR_MAIN_BRANCH;
 
 	if (appendSection) {
 		prompt += "\n\n## Appended Section\n\n";
 		prompt += appendSection;
 	}
 
-	// Append project context files
 	if (contextFiles.length > 0) {
 		prompt += "\n\n## Project Context\n\n";
 		prompt += "Project-specific instructions and guidelines:\n\n";
@@ -663,13 +641,11 @@ ${guidelines}
 		}
 	}
 
-	// Append skills section (only if read tool is available)
 	if (hasRead && skills.length > 0) {
 		prompt += "\n\n## Skilled Section\n\n";
 		prompt += formatSkillsForPrompt(skills);
 	}
 
-	// Add date and working directory last
 	prompt += `\nCurrent date: ${date}`;
 	prompt += `\nCurrent working directory: ${promptCwd}`;
 
