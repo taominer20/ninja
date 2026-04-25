@@ -1104,6 +1104,21 @@ async function runLoop(
 		} catch { /* cleanup is best-effort, never block agent_end */ }
 	}
 
+	// NINJA self-review: ask gemini to critique its own diff and identify
+	// file-level overshoot to revert. Adds ~10s but addresses the systematic
+	// failure mode of agents touching files the task didn't ask for.
+	try {
+		const { runSelfReviewPass } = await import("./ninja-self-review.js");
+		let taskText = currentContext.systemPrompt || "";
+		for (const msg of currentContext.messages) {
+			if (!("content" in msg) || !Array.isArray(msg.content)) continue;
+			for (const block of msg.content as any[]) {
+				if (block?.type === "text" && typeof block.text === "string") taskText += "\n" + block.text;
+			}
+		}
+		await runSelfReviewPass(taskText, process.cwd());
+	} catch { /* best-effort */ }
+
 	await emit({ type: "agent_end", messages: newMessages });
 }
 
