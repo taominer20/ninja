@@ -113,7 +113,83 @@ export async function runAgentLoop(
 		await emit({ type: "message_end", message: prompt });
 	}
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	// NINJA pre-loop file targeting: scan task text for symbol/path hints,
+	// resolve to high-confidence file paths in the repo, and inject a single
+	// "primary targets" user message BEFORE the agent's first response so
+	// gemini anchors on the right files from turn 1. This addresses the
+	// most common failure mode (file disambiguation: agent picks a similarly
+	// named but wrong file and scores zero).
+	//
+	// Only injects when the heuristic finds at least one high-confidence
+	// target (score ≥ 30). Otherwise stays silent — better to let the
+	// system prompt's own discovery logic run than to mislead with low
+	// confidence guesses.
+	if (process.env.NINJA_TARGETING !== "0") {
+		try {
+			let taskText = "";
+			for (const msg of [...context.messages, ...prompts]) {
+				if (!("content" in msg) || !Array.isArray((msg as any).content)) continue;
+				if ((msg as any).role !== "user") continue;
+				for (const block of (msg as any).content) {
+					if (block?.type === "text" && typeof block.text === "string") taskText += block.text + "\n";
+				}
+			}
+			const { identifyTargetFiles } = await import("./ninja-target-files.js");
+			const targeting = identifyTargetFiles(taskText, process.cwd(), 6);
+			if (targeting.primary.length > 0) {
+				const list = targeting.primary.map((p) => `\`${p}\``).join(", ");
+				const msg = `Pre-loop file analysis identified these as the most likely target files based on backtick paths, named symbols, and import-graph signals: ${list}. Read each of these BEFORE editing anything else; treat any other file as a candidate only if a hard acceptance criterion explicitly requires it.`;
+				currentContext.messages.push({
+					role: "user",
+					content: [{ type: "text", text: msg }],
+					timestamp: Date.now(),
+				});
+			}
+		} catch { /* targeting is best-effort, never block solve */ }
+	}
+
+	// NINJA hierarchical execution: 2-phase architecture.
+	//   Phase 1: ask gemini for a structured JSON edit plan
+	//   Phase 2: mechanically apply each edit (no gemini drift)
+	//
+	// If the plan succeeds with ≥3 edits or covers ALL planned anchors,
+	// SKIP the free-form loop entirely — its further edits would only drift
+	// from the plan's surgical state. If plan succeeds partially, fall
+	// through to free-form to fill gaps.
+	let planSucceededFully = false;
+	if (process.env.NINJA_PLAN_EXEC === "1") {
+		try {
+			let taskText = "";
+			for (const msg of [...context.messages, ...prompts]) {
+				if (!("content" in msg) || !Array.isArray((msg as any).content)) continue;
+				if ((msg as any).role !== "user") continue;
+				for (const block of (msg as any).content) {
+					if (block?.type === "text" && typeof block.text === "string") taskText += block.text + "\n";
+				}
+			}
+			const { generatePlan } = await import("./ninja-plan.js");
+			const { executePlan } = await import("./ninja-execute.js");
+			const plan = await generatePlan(taskText, currentContext.systemPrompt || "", process.cwd());
+			if (plan && plan.edits.length > 0) {
+				const result = executePlan(plan, process.cwd());
+				if (result.successCount > 0 && result.skipped.length === 0) {
+					// All planned edits landed → plan is complete. Skip free-form.
+					planSucceededFully = true;
+				} else if (result.successCount > 0) {
+					// Partial success — let free-form fill gaps with awareness.
+					currentContext.messages.push({
+						role: "user",
+						content: [{ type: "text", text: `[NINJA-PLAN] Pre-applied ${result.successCount}/${plan.edits.length} structured edits in ${[...result.landedFiles].join(", ")}. ${result.skipped.length} planned edits failed to anchor — fix those plus anything else the task requires.` }],
+						timestamp: Date.now(),
+					});
+				}
+			}
+		} catch { /* best-effort */ }
+	}
+
+	if (!planSucceededFully) {
+		await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	}
 	return newMessages;
 }
 
@@ -1102,6 +1178,21 @@ async function runLoop(
 				} catch { /* skip this file */ }
 			}
 		} catch { /* cleanup is best-effort, never block agent_end */ }
+	}
+
+	// NINJA blank-line collapse: gemini systematically inserts blank lines,
+	// inflating the changed-line denominator. After EDGE G's whitespace
+	// cleanup, run a pass that detects pure-spacing edits and collapses
+	// runs of 3+ consecutive blank lines.
+	if (hasProducedEdit && process.env.NINJA_BLANK_COLLAPSE !== "0") {
+		try {
+			const { collapseBlankRunsInFile } = await import("./ninja-blank-collapse.js");
+			for (const editedPath of editedPaths) {
+				const norm = editedPath.replace(/^\.\//, "");
+				if (!norm || norm.includes("..")) continue;
+				try { collapseBlankRunsInFile(norm, process.cwd()); } catch { /* skip */ }
+			}
+		} catch { /* best-effort */ }
 	}
 
 	// NINJA self-review: ask gemini to critique its own diff and identify

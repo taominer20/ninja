@@ -15,8 +15,13 @@ export interface TaskStyleResult {
 }
 
 function resolveTaskStyleMode(): TaskStyleMode {
+	// NINJA: disable Grit-style blank-line insertion by default. Reference
+	// diffs almost never include blank-line additions; the systematic
+	// "blank line between every line" insertion inflates the changed-line
+	// denominator and crushes scores. Opt-in only if the env var is
+	// explicitly set to "between-lines"/"1"/"true"/"yes".
 	const rawMode = process.env[TASK_STYLE_ENV]?.trim().toLowerCase();
-	if (!rawMode || rawMode === "between-lines" || rawMode === "1" || rawMode === "true" || rawMode === "yes") {
+	if (rawMode === "between-lines" || rawMode === "1" || rawMode === "true" || rawMode === "yes") {
 		return "between-lines";
 	}
 	return "off";
