@@ -357,7 +357,7 @@ async function runLoop(
 			return !wasEdited(f);
 		});
 		let breadthHint = "";
-		if (consecutiveEditsOnSameFile >= 5 && uneditedTargets.length > 0) {
+		if (consecutiveEditsOnSameFile >= 3 && uneditedTargets.length > 0) {
 			breadthHint = ` STOP editing \`${normTarget}\` — you have made ${consecutiveEditsOnSameFile} consecutive edits on it. ${uneditedTargets.length} file(s) still need ANY edit: ${uneditedTargets
 				.slice(0, 6)
 				.map((f: string) => `\`${f}\``)
