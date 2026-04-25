@@ -738,21 +738,17 @@ def t10_hallucinated_suppress(repo_root: Path) -> TweakResult:
 # --------------------------------------------------------------------------- #
 
 TWEAKS: list[tuple[str, Callable[[Path], TweakResult]]] = [
-    # Foundation tweaks (always-on, validated)
-    ("T1 task_style_off", t1_task_style_off),
-    ("T4 edge_g_ensure", t4_edge_g_ensure),
-    ("T2 file_targeting", t2_file_targeting),
-    ("T3 blank_run_collapse", t3_blank_run_collapse),
-    # Loop-start directive tweaks (always-on, conservative text additions)
-    ("T5 minimal_change_dir", t5_minimal_change_dir),
-    ("T8 style_mirror_dir", t8_style_mirror_dir),
-    ("T9 reread_task_dir", t9_reread_task_dir),
-    # Post-edit tweaks
-    ("T7 gemini_self_review", t7_gemini_self_review),
-    ("T10 hallucinated_suppress", t10_hallucinated_suppress),
-    # T6 (pre_plan_turn) is held back — its no-tools-first-turn directive
-    # caused agents to fail to edit on at least one task in our 4-task bench.
-    # Available for ablation via direct call to t6_pre_plan_turn() if needed.
+    # ONLY validated tweaks. Each has bench evidence on at least 3 tasks.
+    ("T1 task_style_off", t1_task_style_off),  # confirmed ~4x score lift on t11
+    ("T4 edge_g_ensure", t4_edge_g_ensure),    # already in Mine016, preservation only
+    ("T2 file_targeting", t2_file_targeting),  # 779824e beat king 3-0
+    ("T3 blank_run_collapse", t3_blank_run_collapse),  # defensive backstop
+    # Held back pending individual validation:
+    #   T5 minimal_change_dir, T6 pre_plan_turn, T7 gemini_self_review,
+    #   T8 style_mirror_dir, T9 reread_task_dir, T10 hallucinated_suppress
+    # These remain DEFINED in this file but are NOT applied. Move to active
+    # list ONLY after a head-to-head bench against current king on ≥5 tasks
+    # with ≥3% average score uplift.
 ]
 
 
